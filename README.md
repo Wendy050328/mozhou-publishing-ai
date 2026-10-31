@@ -1,4 +1,4 @@
-# 墨舟 AI 文案合规审核
+# 墨舟 AI 文案生成及合规审核
 
 前端使用 `AI文案合规审核原型`（React）。后端为 FastAPI + SQLite。AI / Agent 的真实调用留在 `backend/app/services/agent_stub.py`，由其他成员实现。
 
