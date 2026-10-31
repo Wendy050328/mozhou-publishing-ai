@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.vite/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+.env
+.env.*
+*.zip
+.idea/
+.vscode/

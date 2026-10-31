@@ -1,0 +1,12 @@
+{
+  "description": "为编辑、主编和管理员提供 AI 文案生成、敏感词合规筛查、人工审核与版本追踪，帮助团队高效管理出版文案流程。",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  },
+  "title": "墨舟 AI · 文案生成与合规工作台",
+  "language": "zh-CN"
+}
