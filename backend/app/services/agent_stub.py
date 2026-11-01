@@ -6,7 +6,7 @@ AGENT_MODE:
 - mock：不调用模型，写入模拟工具链与 3 组候选，便于联调选定/审核
 
 真实实现请替换 run_agent()，并继续把每次工具调用写入 AgentCall。
-工具签名见文件末尾。
+对接约定见仓库根目录《AI与Agent对接说明.md》。工具签名见文件末尾。
 """
 
 from __future__ import annotations
