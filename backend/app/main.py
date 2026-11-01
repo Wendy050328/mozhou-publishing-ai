@@ -377,6 +377,17 @@ def bootstrap(db: Session = Depends(get_db), user: User = Depends(current_user))
     }
 
 
+def material_by_title(db: Session, title: str, task_id: str) -> Material | None:
+    name = (title or "").strip()
+    if not name:
+        return None
+    rows = [item for item in db.query(Material).order_by(Material.id.asc()).all() if (item.title or "").strip() == name]
+    others = [item for item in rows if item.task_id != task_id]
+    if others:
+        return others[0]
+    return rows[0] if rows else None
+
+
 def _sync_owned_material(db: Session, task: Task) -> None:
     owned = db.query(Material).filter(Material.task_id == task.id).first()
     if not owned:
@@ -519,17 +530,19 @@ def run_task(task_id: str, body: RunIn, db: Session = Depends(get_db), user: Use
     ensure_edit(db, user, task, "发起 AI 处理")
     if body.styles is not None:
         task.styles_json = json.dumps(body.styles, ensure_ascii=False)
-    if body.material:
-        task.material_id = body.material
     if body.prompt is not None:
         task.prompt = body.prompt.strip()
-    if len((task.intro or "").strip()) < 50 or not styles_of(task) or not task.title or not task.author or not task.material_id:
-        raise HTTPException(422, {"fields": {"intro": "信息不足：请补充书名、作者、至少 50 字简介、风格及书稿数据 ID。"}})
+    matched = material_by_title(db, task.title, task.id)
+    if not matched:
+        raise HTTPException(422, {"fields": {"material": f"没有与书名「{task.title.strip()}」同名的资料，请先在资料管理中创建。"}})
+    task.material_id = matched.id
+    if len((task.intro or "").strip()) < 50 or not styles_of(task) or not task.title or not task.author:
+        raise HTTPException(422, {"fields": {"intro": "信息不足：请补充书名、作者、至少 50 字简介和风格。"}})
     if body.retry and task.retries >= 2:
         raise HTTPException(400, "已达到最大重试次数 R = 2")
     call_count = db.query(AgentCall).filter(AgentCall.task_id == task.id).count()
-    if call_count + 4 > 12:
-        raise HTTPException(400, "已达到单任务调用次数上限 N = 12")
+    if call_count + 4 > 30:
+        raise HTTPException(400, "已达到单任务调用次数上限 N = 30")
     allowed = ["待处理", "退回", "待审核", "失败", "运行中"]
     if task.status not in allowed:
         raise HTTPException(400, "当前任务状态不支持发起生成")
@@ -579,8 +592,8 @@ def scan_task(task_id: str, body: ScanIn, db: Session = Depends(get_db), user: U
         raise HTTPException(400, "请先完成 AI 生成并选择候选文案。")
     if not body.text.strip():
         raise HTTPException(400, "请输入待检文本。")
-    if db.query(AgentCall).filter(AgentCall.task_id == task.id).count() >= 12:
-        raise HTTPException(400, "已达到单任务调用次数上限 N = 12")
+    if db.query(AgentCall).filter(AgentCall.task_id == task.id).count() >= 30:
+        raise HTTPException(400, "已达到单任务调用次数上限 N = 30")
 
     error = ""
     hits = []
@@ -872,7 +885,7 @@ def list_materials(db: Session = Depends(get_db), user: User = Depends(current_u
 @app.post("/api/materials")
 def create_material(body: MaterialIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     if user.role == "主编":
-        audit(db, user, "创建教学资料", body.title, "403 · 权限拒绝")
+        audit(db, user, "创建资料", body.title, "403 · 权限拒绝")
         db.commit()
         raise HTTPException(403, "主编不可创建资料")
     errors = _validate_material(body)
@@ -881,7 +894,7 @@ def create_material(body: MaterialIn, db: Session = Depends(get_db), user: User 
     item = Material(id=_next_material_id(db), extra_json="{}")
     _apply_material(item, body)
     db.add(item)
-    audit(db, user, "创建教学资料", f"{item.id} · {item.type}")
+    audit(db, user, "创建资料", f"{item.id} · {item.type}")
     db.commit()
     db.refresh(item)
     return material_dict(item)

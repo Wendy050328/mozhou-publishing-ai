@@ -126,6 +126,7 @@ const now = () => new Date().toLocaleString("sv-SE").slice(0, 16)
 export default function App() {
   const [signedIn, setSignedIn] = useState(false)
   const [page, setPage] = useState<Page>("tasks")
+  const [pageHistory, setPageHistory] = useState<Page[]>([])
   const [role, setRole] = useState<Role>("编辑")
   const [tasks, setTasks] = useState<Task[]>([...initialTasks, otherTask])
   const [activeId, setActiveId] = useState("TASK-001")
@@ -140,6 +141,7 @@ export default function App() {
   const [toast, setToast] = useState<ToastMessage | null>(null)
   const [modal, setModal] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingWorkspace, setEditingWorkspace] = useState(false)
   const [savingForm, setSavingForm] = useState(false)
   const [form, setForm] = useState({
     title: "",
@@ -367,10 +369,22 @@ export default function App() {
       return
     }
     setPage(next)
+    setPageHistory([])
     setListPage(1)
     setChecked([])
     if (next === "review") setStatus("待审核")
     else if (next === "tasks") setStatus("全部")
+  }
+  function goBack() {
+    const prev = pageHistory[pageHistory.length - 1]
+    setPageHistory((history) => (history.length ? history.slice(0, -1) : history))
+    setPage(prev || "tasks")
+  }
+  function backLabel() {
+    const prev = pageHistory[pageHistory.length - 1]
+    if (prev === "review") return "返回工作台"
+    if (prev && prev !== "tasks") return "返回上一级"
+    return "返回任务列表"
   }
   const roleAccount: Record<Role, { email: string; name: string }> = {
     编辑: { email: "linxiao@example.com", name: "林晓" },
@@ -396,6 +410,8 @@ export default function App() {
     setDictVersion("DICT-V1")
     if (boot.tasks[0]) setActiveId(boot.tasks[0].id)
     setRole(next)
+    setPageHistory([])
+    setEditingWorkspace(false)
     setPage(next === "主编" ? "review" : "tasks")
     setStatus(next === "主编" ? "待审核" : "全部")
     setListPage(1)
@@ -428,7 +444,7 @@ export default function App() {
       ),
     )
     const persist: Record<string, unknown> = {}
-    ;(["title", "author", "intro", "styles", "material", "copy", "reason", "selected", "prompt"] as const).forEach(
+    ;(["title", "author", "intro", "contents", "styles", "material", "copy", "reason", "selected", "prompt"] as const).forEach(
       (key) => {
         if (key in patch) persist[key] = patch[key]
       },
@@ -444,6 +460,7 @@ export default function App() {
     }
     setActiveId(task.id)
     setTab(targetTab)
+    setPageHistory((history) => [...history, page])
     setPage("detail")
     setScan(null)
     setScanText(task.copy)
@@ -455,11 +472,13 @@ export default function App() {
       denied("修改任务", task?.id || "新建任务", true)
       return
     }
-    if (task && !["待处理", "退回", "失败"].includes(task.status)) {
-      notify("该状态不可修改基础资料，请在人工微调中编辑文案。", true)
+    if (task && ["完成", "运行中"].includes(task.status)) {
+      notify(task.status === "运行中" ? "任务生成中，请稍后再修改。" : "已审核通过的任务不能修改。", true)
       return
     }
+    if (task) setActiveId(task.id)
     setEditingId(task?.id || null)
+    setEditingWorkspace(!!task)
     setForm(
       task
         ? {
@@ -478,7 +497,9 @@ export default function App() {
           },
     )
     setErrors({})
+    setPageHistory((history) => [...history, page])
     setPage("form")
+    setTab(0)
   }
   async function saveForm(generate: boolean) {
     if (role === "主编")
@@ -549,7 +570,7 @@ export default function App() {
         ]
       })
       if (generate) {
-        setPage("detail")
+        setEditingWorkspace(true)
         setTab(0)
         setScan(null)
         setScanText("")
@@ -595,35 +616,39 @@ export default function App() {
       notify((error as ApiError).message || "删除失败", true)
     }
   }
+  function materialForTitle(title: string, taskId = "") {
+    const name = title.trim()
+    const rows = materials.filter((item) => item.title.trim() === name)
+    return rows.find((item) => item.taskId !== taskId) || rows[0]
+  }
   async function startGeneration(task = current, retry = false) {
     if (role === "主编" || (role === "编辑" && task.creator !== user))
       return denied("发起 AI 处理", task.id)
     if (run) return notify("已有任务正在处理，请等待完成。", true)
     if (!["待处理", "退回", "待审核", "失败", "运行中"].includes(task.status))
       return notify("当前任务状态不支持发起生成。", true)
-    if (
-      task.intro.length < 50 ||
-      !task.styles.length ||
-      !task.title ||
-      !task.author ||
-      !task.material
-    )
-      return notify(
-        "信息不足：请补充书名、作者、至少 50 字简介、风格及书稿数据 ID。",
-        true,
-      )
+    const matched = materialForTitle(task.title, task.id)
+    if (!matched)
+      return notify(`没有与书名「${task.title}」同名的资料，请先在资料管理中创建。`, true)
+    if (task.intro.length < 50 || !task.styles.length || !task.title || !task.author)
+      return notify("信息不足：请补充书名、作者、至少 50 字简介和风格。", true)
     if (retry && task.retries >= 2)
       return notify("已达到最大重试次数 R = 2，请检查资料或联系管理员。", true)
-    if ((calls[task.id] || []).length + 4 > 12)
-      return notify("已达到单任务调用次数上限 N = 12，请新建教学任务。", true)
+    if ((calls[task.id] || []).length + 4 > 30)
+      return notify("已达到单任务调用次数上限 N = 30，请新建教学任务。", true)
     setActiveId(task.id)
-    setPage("detail")
+    setEditingId(task.id)
+    setEditingWorkspace(true)
+    if (page !== "form") {
+      setPageHistory((history) => [...history, page])
+      setPage("form")
+    }
     setTab(0)
     setScan(null)
     setTasks((prev) =>
       prev.map((t) =>
         t.id === task.id
-          ? { ...t, status: "运行中", submitted: false, selected: -1 }
+          ? { ...t, material: matched.id, status: "运行中", submitted: false, selected: -1 }
           : t,
       ),
     )
@@ -634,7 +659,7 @@ export default function App() {
         retry,
         simulate_fail: failureMode,
         styles: task.styles,
-        material: task.material,
+        material: matched.id,
         prompt: task.prompt || "",
       })
       runResult.current = data
@@ -650,8 +675,8 @@ export default function App() {
     if (!current.versions.length)
       return notify("请先完成 AI 生成并选择候选文案。", true)
     if (!scanText.trim()) return notify("请输入待检文本。", true)
-    if ((calls[current.id] || []).length >= 12)
-      return notify("已达到单任务调用次数上限 N = 12，请新建教学任务。", true)
+    if ((calls[current.id] || []).length >= 30)
+      return notify("已达到单任务调用次数上限 N = 30，请新建教学任务。", true)
     setScanning(true)
     setScan(null)
     try {
@@ -661,7 +686,11 @@ export default function App() {
         simulate_timeout: scanFailure,
       })
       setScan(data.scan)
-      setTasks((prev) => prev.map((t) => (t.id === data.task.id ? data.task : t)))
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === data.task.id ? { ...data.task, copy: t.copy, reason: t.reason } : t,
+        ),
+      )
       setCalls((prev) => ({ ...prev, [data.task.id]: data.calls }))
       notify(data.message, !!(data.scan.error || data.scan.hits.length))
     } catch (error) {
@@ -674,23 +703,24 @@ export default function App() {
     if (role !== "编辑" || current.creator !== user)
       return denied("人工微调提交")
     if (!["待处理", "退回"].includes(current.status))
-      return notify("请先完成编辑与合规筛查，再确认提交。提交前状态不会变为待审核。", true)
-    if (!current.copy.trim() || !current.reason.trim())
-      return setErrors({
-        copy: !current.copy.trim() ? "请输入提交文案" : "",
-        reason: !current.reason.trim() ? "请填写采用理由" : "",
-      })
-    if (
-      !scan ||
-      scan.error ||
-      scan.hits.length ||
-      scan.text !== current.copy ||
-      scan.version !== dictVersion
-    )
-      return notify("请对当前提交文案执行合规筛查，并取得通过结论。", true)
+      return notify("只有待处理或退回的任务可以提交审核。", true)
+    if (current.selected < 0)
+      return notify("请先选定一组候选文案。", true)
+    if (!current.reason.trim()) {
+      setTab(2)
+      setErrors({ reason: "请填写采用理由" })
+      return notify("请填写采用理由后再提交。", true)
+    }
+    if (!scan || scan.error || scan.hits.length)
+      return notify(scan?.error ? "筛查未通过，请处理后再提交。" : scan?.hits.length ? "筛查发现敏感词，请修改文案后重新筛查。" : "请先对即将提交的文案完成合规筛查，并取得通过结论。", true)
+    if (scan.version !== dictVersion)
+      return notify("词库版本已变化，请按当前词库重新筛查后再提交。", true)
+    const submitText = scan.text
+    if (!submitText.trim())
+      return notify("筛查文本为空，请重新筛查后再提交。", true)
     try {
       const task = await api.submitTask(current.id, {
-        copy: current.copy,
+        copy: submitText,
         reason: current.reason,
         rule_version: dictVersion,
       })
@@ -1225,23 +1255,20 @@ export default function App() {
                           </Button>
                           {!isReview && (
                             <>
-                              {task.status === "待处理" ? (
+                              {task.status === "运行中" ? (
+                                <span className="row-action-placeholder">处理中</span>
+                              ) : (
+                                role === "编辑" &&
+                                task.creator === user &&
+                                task.status !== "完成" && (
+                                  <Button variant="text" onClick={() => openForm(task)}>
+                                    修改
+                                  </Button>
+                                )
+                              )}
+                              {task.status === "失败" && role === "编辑" && task.creator === user && (
                                 <Button
                                   variant="text"
-                                  disabled={role === "主编"}
-                                  title={
-                                    role === "主编"
-                                      ? "主编不可修改任务"
-                                      : "编辑任务资料"
-                                  }
-                                  onClick={() => openForm(task)}
-                                >
-                                  修改
-                                </Button>
-                              ) : task.status === "失败" ? (
-                                <Button
-                                  variant="text"
-                                  disabled={role === "主编"}
                                   onClick={() => {
                                     setActiveId(task.id)
                                     setModal("retry")
@@ -1249,20 +1276,8 @@ export default function App() {
                                 >
                                   重试
                                 </Button>
-                              ) : task.status === "退回" ? (
-                                <Button
-                                  variant="text"
-                                  disabled={role !== "编辑"}
-                                  title="仅编辑可微调提交"
-                                  onClick={() => openTask(task, 2)}
-                                >
-                                  微调
-                                </Button>
-                              ) : task.status === "运行中" ? (
-                                <span className="row-action-placeholder">
-                                  处理中
-                                </span>
-                              ) : (
+                              )}
+                              {!["待处理", "失败", "退回", "运行中"].includes(task.status) && (
                                 <Button
                                   variant="ghost"
                                   icon="more"
@@ -1290,7 +1305,7 @@ export default function App() {
           )}
           {pagination(filtered.length, listPage, setListPage)}
         </section>
-        <section className="process-panel">
+        {role !== "主编" && <section className="process-panel">
           <div className="process-title">
             <span className="process-title-icon">
               <Icon name="grid" size={17} />
@@ -1327,7 +1342,7 @@ export default function App() {
               </div>
             ))}
           </div>
-        </section>
+        </section>}
         <div className="context-note">
           <Icon name="shield" size={13} />
           <span>所有业务结果与工具调用记录共用任务 ID，支持全流程追溯。</span>
@@ -1346,9 +1361,9 @@ export default function App() {
           variant="text"
           icon="back"
           className="back-button"
-          onClick={() => navigate("tasks")}
+          onClick={goBack}
         >
-          返回任务列表
+          {backLabel()}
         </Button>
         {pageHeader(
           editingId ? "编辑任务" : "新建文案任务",
@@ -1519,25 +1534,32 @@ export default function App() {
     )
   }
 
-  function renderDetail() {
+  function renderDetail(editing = false) {
     const candidates = current.candidates || []
     const taskCalls = calls[current.id] || []
-    const reviewing = role === "主编" || role === "管理员"
+    const reviewing = role === "管理员"
+    const canEdit = editing
+      ? role === "编辑" && current.creator === user && !["完成", "运行中"].includes(current.status)
+      : false
+    const linkedMaterial = materialForTitle(current.title, current.id)
     return (
       <>
         <Button
           variant="text"
           icon="back"
           className="back-button"
-          onClick={() => navigate(role === "主编" ? "review" : "tasks")}
+          onClick={goBack}
         >
-          返回{role === "主编" ? "审核工作台" : "任务列表"}
+          {backLabel()}
         </Button>
         {pageHeader(
           current.title,
           `${current.id}　/　作者：${current.author}　/　创建人：${current.creator}　/　更新于 ${current.time}`,
           <>
             <Badge status={current.status} />
+            {!editing && role === "编辑" && current.creator === user && !["完成", "运行中"].includes(current.status) && (
+              <Button variant="primary" onClick={() => openForm(current)}>修改</Button>
+            )}
             {role === "编辑" && current.creator === user && current.status !== "完成" && (
               <Button onClick={() => removeTask(current)}>删除任务</Button>
             )}
@@ -1591,35 +1613,24 @@ export default function App() {
                     </div>
                     <div>
                       <Heading level={3}>
-                        {current.title} ·{" "}
-                        {materials.find((item) => item.id === current.material)?.type ||
-                          "书稿摘要"}
+                        {current.title} · {linkedMaterial?.type || "书稿摘要"}
                       </Heading>
-                      <span className="mono">{current.material}</span>
+                      <span className="mono">{linkedMaterial?.id || "未关联"}</span>
                     </div>
                     <Badge status="完成">已关联</Badge>
                   </div>
                   <dl className="metadata">
                     <div>
                       <dt>数据类型</dt>
-                      <dd>
-                        {materials.find((item) => item.id === current.material)?.type ||
-                          "书稿摘要"}
-                      </dd>
+                      <dd>{linkedMaterial?.type || "书稿摘要"}</dd>
                     </div>
                     <div>
                       <dt>资料来源</dt>
-                      <dd>
-                        {materials.find((item) => item.id === current.material)?.source ||
-                          "—"}
-                      </dd>
+                      <dd>{linkedMaterial?.source || "—"}</dd>
                     </div>
                     <div>
                       <dt>资料版本</dt>
-                      <dd>
-                        {materials.find((item) => item.id === current.material)?.version ||
-                          "V1.0"}
-                      </dd>
+                      <dd>{linkedMaterial?.version || "V1.0"}</dd>
                     </div>
                     <div>
                       <dt>关联任务</dt>
@@ -1628,23 +1639,19 @@ export default function App() {
                   </dl>
                   <Heading level={3}>内容预览</Heading>
                   <p className="manuscript-preview">
-                    {materials.find((item) => item.id === current.material)?.content ||
-                      current.intro ||
-                      "暂无简介，请先完善任务资料。"}
+                    {linkedMaterial?.content || current.intro || "暂无同名资料，请先在资料管理中创建与书名相同的资料。"}
                   </p>
-                  {materials.find((item) => item.id === current.material)?.excerpt && (
+                  {linkedMaterial?.excerpt && (
                     <>
                       <Heading level={3}>精选片段</Heading>
-                      <p className="manuscript-preview">
-                        {materials.find((item) => item.id === current.material)?.excerpt}
-                      </p>
+                      <p className="manuscript-preview">{linkedMaterial.excerpt}</p>
                     </>
                   )}
                   <Button
                     icon="external"
                     variant="text"
                     onClick={() => {
-                      const found = materials.find((item) => item.id === current.material)
+                      const found = linkedMaterial
                       if (!found) {
                         notify("未找到关联资料", true)
                         return
@@ -1664,28 +1671,84 @@ export default function App() {
                       Agent 工作流
                     </span>
                   </div>
-                  <Field label="书稿数据 ID" required>
-                    <Select
-                      value={current.material}
-                      disabled={!canEdit || current.status === "运行中"}
-                      onChange={(e) => {
-                        const found = materials.find((item) => item.id === e.target.value)
-                        patchTask({
-                          material: e.target.value,
-                          ...(found ? { title: found.title } : {}),
-                        })
-                      }}
-                    >
-                      {materials.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.id} · {item.title}
-                        </option>
-                      ))}
-                      {current.material &&
-                        !materials.some((item) => item.id === current.material) && (
-                          <option value={current.material}>{current.material}</option>
-                        )}
-                    </Select>
+                  {editing && (
+                    <>
+                      <Field label="书名" required>
+                        <Input
+                          value={current.title}
+                          disabled={!canEdit}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setTasks((prev) =>
+                              prev.map((item) =>
+                                item.id === current.id ? { ...item, title: value } : item,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => {
+                            const matched = materialForTitle(e.target.value, current.id)
+                            patchTask({
+                              title: e.target.value,
+                              ...(matched ? { material: matched.id } : {}),
+                            })
+                          }}
+                        />
+                      </Field>
+                      <Field label="作者">
+                        <Input
+                          value={current.author}
+                          disabled={!canEdit}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setTasks((prev) =>
+                              prev.map((item) =>
+                                item.id === current.id ? { ...item, author: value } : item,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => patchTask({ author: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="内容简介" hint="发起 AI 时至少 50 字。">
+                        <Textarea
+                          rows={4}
+                          value={current.intro}
+                          disabled={!canEdit}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setTasks((prev) =>
+                              prev.map((item) =>
+                                item.id === current.id ? { ...item, intro: value } : item,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => patchTask({ intro: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="目录" hint="选填。">
+                        <Textarea
+                          rows={3}
+                          value={current.contents || ""}
+                          disabled={!canEdit}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setTasks((prev) =>
+                              prev.map((item) =>
+                                item.id === current.id ? { ...item, contents: value } : item,
+                              ),
+                            )
+                          }}
+                          onBlur={(e) => patchTask({ contents: e.target.value })}
+                        />
+                      </Field>
+                    </>
+                  )}
+                  <Field label="关联资料" hint="按书名自动关联同名资料，生成时使用这份书稿。">
+                    <div className="mono">
+                      {linkedMaterial
+                        ? `${linkedMaterial.id} · ${linkedMaterial.title}`
+                        : `没有与「${current.title || "当前书名"}」同名的资料`}
+                    </div>
                   </Field>
                   <Field label="目标风格" required>
                     <div className="style-options">
@@ -1790,14 +1853,16 @@ export default function App() {
                           {2 - current.retries} 次，人工版本不会被覆盖。
                         </p>
                       </Notice>
-                      <Button
-                        variant="primary"
-                        icon="refresh"
-                        disabled={!canEdit || current.retries >= 2}
-                        onClick={() => setModal("retry")}
-                      >
-                        重试任务
-                      </Button>
+                      {canEdit && (
+                        <Button
+                          variant="primary"
+                          icon="refresh"
+                          disabled={current.retries >= 2}
+                          onClick={() => setModal("retry")}
+                        >
+                          重试任务
+                        </Button>
+                      )}
                     </>
                   ) : (
                     <>
@@ -1808,31 +1873,30 @@ export default function App() {
                           组候选文案。信息缺失时停止，不编造内容。
                         </p>
                       </Notice>
-                      <label className="check-label">
-                        <Input
-                          type="checkbox"
-                          checked={failureMode}
-                          disabled={!canEdit}
-                          onChange={(e) => setFailureMode(e.target.checked)}
-                        />
-                        演示模型超时失败（E-MODEL-01）
-                      </label>
-                      <Button
-                        variant="primary"
-                        icon="sparkles"
-                        disabled={!canEdit || current.status === "完成"}
-                        title={!canEdit ? "当前角色不可发起 AI" : ""}
-                        onClick={() => startGeneration()}
-                      >
-                        {current.versions.length
-                          ? "重新生成 3 组候选"
-                          : "发起 AI 处理"}
-                      </Button>
+                      {canEdit && (
+                        <>
+                          <label className="check-label">
+                            <Input
+                              type="checkbox"
+                              checked={failureMode}
+                              onChange={(e) => setFailureMode(e.target.checked)}
+                            />
+                            演示模型超时失败（E-MODEL-01）
+                          </label>
+                          <Button
+                            variant="primary"
+                            icon="sparkles"
+                            onClick={() => startGeneration()}
+                          >
+                            {current.versions.length ? "重新生成 3 组候选" : "发起 AI 处理"}
+                          </Button>
+                        </>
+                      )}
                     </>
                   )}
                   <div className="runtime-limits">
                     <Icon name="info" size={14} />
-                    调用上限 N = 12 · 超时 T = 30 秒 · 重试 R ≤ 2
+                    调用上限 N = 30 · 超时 T = 30 秒 · 重试 R ≤ 2
                   </div>
                 </section>
               </div>
@@ -1889,31 +1953,31 @@ export default function App() {
                           <span className="candidate-batch">
                             {current.batch} · {current.material} · TPL-001@V1.2
                           </span>
-                          <Button
-                            variant={
-                              current.selected === i ? "primary" : "secondary"
-                            }
-                            icon={current.selected === i ? "check" : undefined}
-                            disabled={
-                              !canEdit ||
-                              ["完成", "运行中"].includes(current.status)
-                            }
-                            onClick={async () => {
-                              try {
-                                const task = await api.selectCandidate(current.id, i)
-                                setTasks((prev) =>
-                                  prev.map((t) => (t.id === task.id ? task : t)),
-                                )
-                                setScanText(task.copy)
-                                setScan(null)
-                                notify(`已选定方案 0${i + 1}。`)
-                              } catch (error) {
-                                notify((error as ApiError).message || "选定失败", true)
-                              }
-                            }}
-                          >
-                            {current.selected === i ? "已选定此条" : "选定此条"}
-                          </Button>
+                          {canEdit ? (
+                            <Button
+                              variant={current.selected === i ? "primary" : "secondary"}
+                              icon={current.selected === i ? "check" : undefined}
+                              onClick={async () => {
+                                try {
+                                  const task = await api.selectCandidate(current.id, i)
+                                  setTasks((prev) =>
+                                    prev.map((t) =>
+                                      t.id === task.id ? { ...task, reason: t.reason } : t,
+                                    ),
+                                  )
+                                  setScanText(task.copy)
+                                  setScan(null)
+                                  notify(`已选定方案 0${i + 1}。`)
+                                } catch (error) {
+                                  notify((error as ApiError).message || "选定失败", true)
+                                }
+                              }}
+                            >
+                              {current.selected === i ? "已选定此条" : "选定此条"}
+                            </Button>
+                          ) : (
+                            current.selected === i && <Badge status="完成">已选定</Badge>
+                          )}
                         </section>
                       ))}
                     </div>
@@ -1922,14 +1986,16 @@ export default function App() {
                         <Icon name="info" size={14} />
                         候选结果用于教学演示，不代表真实模型输出。
                       </span>
-                      <Button
-                        variant="primary"
-                        icon="arrow"
-                        disabled={current.selected < 0}
-                        onClick={() => setTab(2)}
-                      >
-                        下一步：人工微调
-                      </Button>
+                      {canEdit && (
+                        <Button
+                          variant="primary"
+                          icon="arrow"
+                          disabled={current.selected < 0}
+                          onClick={() => setTab(2)}
+                        >
+                          下一步：人工微调
+                        </Button>
+                      )}
                     </div>
                   </>
                 )}
@@ -1981,26 +2047,27 @@ export default function App() {
                           </option>
                         </Select>
                       </Field>
-                      <Button
-                        variant="primary"
-                        icon={scanning ? "refresh" : "shield"}
-                        disabled={
-                          scanning || !canEdit || current.status === "完成"
-                        }
-                        onClick={runScan}
-                      >
-                        {scanning ? "筛查中…" : "开始规则筛查"}
-                      </Button>
+                      {canEdit && (
+                        <Button
+                          variant="primary"
+                          icon={scanning ? "refresh" : "shield"}
+                          disabled={scanning}
+                          onClick={runScan}
+                        >
+                          {scanning ? "筛查中…" : "开始规则筛查"}
+                        </Button>
+                      )}
                     </div>
-                    <label className="check-label">
-                      <Input
-                        type="checkbox"
-                        checked={scanFailure}
-                        disabled={!canEdit}
-                        onChange={(e) => setScanFailure(e.target.checked)}
-                      />
-                      模拟本地规则工具超时（E-TOOL-01）
-                    </label>
+                    {canEdit && (
+                      <label className="check-label">
+                        <Input
+                          type="checkbox"
+                          checked={scanFailure}
+                          onChange={(e) => setScanFailure(e.target.checked)}
+                        />
+                        模拟本地规则工具超时（E-TOOL-01）
+                      </label>
+                    )}
                   </div>
                   <div className="scan-help">
                     <Icon name="shield" size={30} />
@@ -2017,19 +2084,21 @@ export default function App() {
                       <br />
                       字符位置从 1 开始，包含末位。
                     </p>
-                    <Button
-                      variant="text"
-                      onClick={() => {
-                        setScanText(
-                          dictVersion.startsWith("OSS")
-                            ? current.copy + "\n详情请点击进入本店，低价出售。"
-                            : current.copy + "\n年度最佳治愈故事，值得阅读。",
-                        )
-                        setScan(null)
-                      }}
-                    >
-                      填入命中词演示文本
-                    </Button>
+                    {canEdit && (
+                      <Button
+                        variant="text"
+                        onClick={() => {
+                          setScanText(
+                            dictVersion.startsWith("OSS")
+                              ? current.copy + "\n详情请点击进入本店，低价出售。"
+                              : current.copy + "\n年度最佳治愈故事，值得阅读。",
+                          )
+                          setScan(null)
+                        }}
+                      >
+                        填入命中词演示文本
+                      </Button>
+                    )}
                   </div>
                 </div>
                 {scanning ? (
@@ -2119,23 +2188,11 @@ export default function App() {
                   <span>
                     AC-04-1 定位命中词 · AC-04-2 版本切换 · AC-04-3 失败不误判
                   </span>
-                  <Button
-                    variant="primary"
-                    icon="send"
-                    disabled={
-                      role !== "编辑" ||
-                      current.creator !== user ||
-                      !["待处理", "退回"].includes(current.status) ||
-                      !scan ||
-                      !!scan.error ||
-                      scan.hits.length > 0 ||
-                      scan.text !== current.copy ||
-                      scan.version !== dictVersion
-                    }
-                    onClick={submitCopy}
-                  >
-                    确认并提交审核
-                  </Button>
+                  {canEdit && (
+                    <Button variant="primary" icon="send" onClick={submitCopy}>
+                      确认并提交审核
+                    </Button>
+                  )}
                 </div>
               </>
             )}
@@ -2176,11 +2233,7 @@ export default function App() {
                       <Textarea
                         rows={6}
                         value={current.copy}
-                        disabled={
-                          role !== "编辑" ||
-                          current.creator !== user ||
-                          !["待处理", "退回"].includes(current.status)
-                        }
+                        disabled={!canEdit}
                         onChange={(e) => {
                           const value = e.target.value
                           setTasks((prev) =>
@@ -2197,11 +2250,7 @@ export default function App() {
                       <Textarea
                         rows={3}
                         value={current.reason}
-                        disabled={
-                          role !== "编辑" ||
-                          current.creator !== user ||
-                          !["待处理", "退回"].includes(current.status)
-                        }
+                        disabled={!canEdit}
                         placeholder="说明采用此文案的原因与人工调整依据"
                         onChange={(e) => {
                           const value = e.target.value
@@ -2210,7 +2259,9 @@ export default function App() {
                               item.id === current.id ? { ...item, reason: value } : item,
                             ),
                           )
+                          if (errors.reason) setErrors((prev) => ({ ...prev, reason: "" }))
                         }}
+                        onBlur={(e) => patchTask({ reason: e.target.value })}
                       />
                     </Field>
                   </section>
@@ -2294,14 +2345,10 @@ export default function App() {
                       当前状态为「{current.status}」，不能执行审核。
                     </p>
                   )
-                ) : (
+                ) : canEdit ? (
                   <div className="section-bottom">
                     <Button
-                      disabled={
-                        role !== "编辑" ||
-                        current.creator !== user ||
-                        !["待处理", "退回"].includes(current.status)
-                      }
+                      disabled={!["待处理", "退回"].includes(current.status)}
                       onClick={async () => {
                         try {
                           const task = await api.patchTask(current.id, {
@@ -2332,7 +2379,7 @@ export default function App() {
                       下一步：合规筛查
                     </Button>
                   </div>
-                )}
+                ) : null}
               </>
             )}
             {tab === 4 && <VersionPanel task={current} />}
@@ -2348,11 +2395,11 @@ export default function App() {
                     </p>
                   </div>
                   <Badge tone="indigo" dot={false}>
-                    {taskCalls.length} / 12 次调用
+                    {taskCalls.length} / 30 次调用
                   </Badge>
                 </div>
                 <Notice>
-                  执行策略：单任务调用上限 N = 12；单次工具超时 T = 30
+                  执行策略：单任务调用上限 N = 30；单次工具超时 T = 30
                   秒；最大重试 R =
                   2。模型只选择工具与参数，工具结果由校验与模拟执行层返回。
                 </Notice>
@@ -2490,7 +2537,7 @@ export default function App() {
                 setModal("material-form")
               }}
             >
-              创建教学资料
+              创建资料
             </Button>
           ) : page === "templates" ? (
             <Button
@@ -3106,38 +3153,6 @@ export default function App() {
             </section>
           ))}
         </div>
-        <section className="panel design-card">
-          <Heading>演示快捷入口</Heading>
-          <div className="style-options">
-            <Button icon="plus" onClick={() => openForm()}>
-              创建与字段校验
-            </Button>
-            <Button
-              icon="sparkles"
-              onClick={() => openTask(tasks.find((t) => t.id === "TASK-003")!)}
-            >
-              生成 3 组候选
-            </Button>
-            <Button icon="shield" onClick={() => openTask(tasks[0], 3)}>
-              敏感词规则演示
-            </Button>
-            <Button icon="compare" onClick={() => openTask(tasks[0], 4)}>
-              版本对比
-            </Button>
-            <Button
-              icon="lock"
-              onClick={() => denied("修改他人任务", "TASK-025", true)}
-            >
-              越权修改演示
-            </Button>
-            <Button icon="palette" onClick={() => navigate("design")}>
-              设计系统
-            </Button>
-            <Button icon="alert" onClick={() => navigate("states")}>
-              全局状态
-            </Button>
-          </div>
-        </section>
       </>
     )
   }
@@ -3197,6 +3212,187 @@ export default function App() {
     )
   }
 
+  function renderTaskView() {
+    const canModify =
+      role === "编辑" &&
+      current.creator === user &&
+      !["完成", "运行中"].includes(current.status)
+    const canReview = role === "管理员" && current.status === "待审核" && current.submitted
+    return (
+      <>
+        <Button variant="text" icon="back" className="back-button" onClick={goBack}>
+          {backLabel()}
+        </Button>
+        {pageHeader(
+          current.title,
+          `${current.id}　/　作者：${current.author}　/　创建人：${current.creator}　/　更新于 ${current.time}`,
+          <>
+            <Badge status={current.status} />
+            {canModify && (
+              <Button variant="primary" onClick={() => openForm(current)}>修改</Button>
+            )}
+            {role === "编辑" && current.creator === user && current.status !== "完成" && (
+              <Button onClick={() => removeTask(current)}>删除任务</Button>
+            )}
+          </>,
+        )}
+        {current.status === "退回" && rejectionReason(current) && (
+          <Notice tone="warning" icon="alert">
+            <strong>退回原因</strong>
+            <p>{rejectionReason(current)}</p>
+          </Notice>
+        )}
+        <section className="panel detail-panel">
+          <div className="detail-body">
+            <div className="section-heading">
+              <Heading>任务信息</Heading>
+              <Badge dot={false}>{current.status}</Badge>
+            </div>
+            <dl className="metadata">
+              <div>
+                <dt>书名</dt>
+                <dd>{current.title}</dd>
+              </div>
+              <div>
+                <dt>作者</dt>
+                <dd>{current.author || "未填写"}</dd>
+              </div>
+              <div>
+                <dt>创建人</dt>
+                <dd>{current.creator}</dd>
+              </div>
+              <div>
+                <dt>目标风格</dt>
+                <dd>{current.styles.length ? current.styles.join("、") : "未选择"}</dd>
+              </div>
+            </dl>
+            <Heading level={3}>内容简介</Heading>
+            <p className="manuscript-preview">{current.intro.trim() || "未填写"}</p>
+            <Heading level={3}>目录</Heading>
+            <p className="manuscript-preview">{current.contents?.trim() || "未填写"}</p>
+            <div className="section-heading">
+              <Heading>文案</Heading>
+            </div>
+            <div className="original-copy">{current.copy.trim() || "尚未填写文案"}</div>
+            <dl className="metadata">
+              <div>
+                <dt>采用理由</dt>
+                <dd>{current.reason.trim() || "未填写"}</dd>
+              </div>
+            </dl>
+            {canReview && (
+              <div className="review-actions">
+                <Field
+                  label="审核意见"
+                  required
+                  error={opinionError}
+                  hint="退回时必填；通过时选填。"
+                >
+                  <Textarea
+                    rows={3}
+                    placeholder="请填写审核意见。"
+                    value={reviewOpinion}
+                    onChange={(e) => {
+                      setReviewOpinion(e.target.value)
+                      setOpinionError("")
+                    }}
+                  />
+                </Field>
+                <div className="section-bottom">
+                  <span>审核结果会留在当前提交版本上。</span>
+                  <div className="actions">
+                    <Button variant="danger" onClick={() => reviewTask(false)}>
+                      退回修改
+                    </Button>
+                    <Button variant="primary" icon="check" onClick={() => reviewTask(true)}>
+                      审核通过
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      </>
+    )
+  }
+
+  function renderChiefReview() {
+    const finalCopy = current.copy.trim() || "尚未提交最终文案"
+    return (
+      <>
+        <Button variant="text" icon="back" className="back-button" onClick={goBack}>
+          {backLabel()}
+        </Button>
+        {pageHeader(
+          current.title,
+          `${current.id}　/　作者：${current.author}　/　创建人：${current.creator}　/　更新于 ${current.time}`,
+          <Badge status={current.status} />,
+        )}
+        {current.status === "退回" && rejectionReason(current) && (
+          <Notice tone="warning" icon="alert">
+            <strong>退回原因</strong>
+            <p>{rejectionReason(current)}</p>
+          </Notice>
+        )}
+        <section className="panel detail-panel">
+          <div className="detail-body">
+            <div className="section-heading">
+              <div>
+                <Heading>最终文案</Heading>
+              </div>
+              <Badge dot={false}>待审文本</Badge>
+            </div>
+            <div className="original-copy">{finalCopy}</div>
+            <dl className="metadata">
+              <div>
+                <dt>采用理由</dt>
+                <dd>{current.reason.trim() || "未填写"}</dd>
+              </div>
+              <div>
+                <dt>状态</dt>
+                <dd>{current.status}</dd>
+              </div>
+            </dl>
+            {current.status === "待审核" && current.submitted ? (
+              <div className="review-actions">
+                <Field
+                  label="审核意见"
+                  required
+                  error={opinionError}
+                  hint="退回时必填；通过时选填。"
+                >
+                  <Textarea
+                    rows={3}
+                    placeholder="请填写审核意见。"
+                    value={reviewOpinion}
+                    onChange={(e) => {
+                      setReviewOpinion(e.target.value)
+                      setOpinionError("")
+                    }}
+                  />
+                </Field>
+                <div className="section-bottom">
+                  <span>审核结果会留在当前提交版本上。</span>
+                  <div className="actions">
+                    <Button variant="danger" onClick={() => reviewTask(false)}>
+                      退回修改
+                    </Button>
+                    <Button variant="primary" icon="check" onClick={() => reviewTask(true)}>
+                      审核通过
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="muted">当前状态为「{current.status}」，不能执行审核。</p>
+            )}
+          </div>
+        </section>
+      </>
+    )
+  }
+
   if (!signedIn) return <Login onLogin={completeLogin} />
 
   return (
@@ -3237,7 +3433,10 @@ export default function App() {
                   className={`nav-item ${
                     page === item.id ||
                     (["form", "detail"].includes(page) &&
-                      item.id === (role === "主编" ? "review" : "tasks"))
+                      item.id ===
+                        (page === "detail" && pageHistory[pageHistory.length - 1] === "review"
+                          ? "review"
+                          : "tasks"))
                       ? "nav-active"
                       : ""
                   }`}
@@ -3260,22 +3459,6 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="demo-card">
-            <div>
-              <span className="demo-dot" />
-              <strong>教学演示模式</strong>
-              <span>DEMO</span>
-            </div>
-            <p>
-              所有内容均为模拟数据
-              <br />
-              放心探索，体验完整创作流程
-            </p>
-            <Button variant="text" onClick={() => navigate("help")}>
-              查看演示指南
-              <Icon name="arrow" size={13} />
-            </Button>
-          </div>
           <Button
             variant="ghost"
             className={`nav-item help-nav ${
@@ -3379,9 +3562,11 @@ export default function App() {
           {["tasks", "review"].includes(page) ? (
             renderTaskList()
           ) : page === "form" ? (
-            renderForm()
+            editingWorkspace ? renderDetail(true) : renderForm()
           ) : page === "detail" ? (
-            renderDetail()
+            role === "主编" && pageHistory[pageHistory.length - 1] === "review"
+              ? renderChiefReview()
+              : renderTaskView()
           ) : [
               "materials",
               "templates",
@@ -3510,26 +3695,20 @@ export default function App() {
                 setModal(null)
               }}
             >
-              查看资料与生成
+              查看任务信息
             </Button>
-            <Button
-              icon="compare"
-              onClick={() => {
-                openTask(current, 4)
-                setModal(null)
-              }}
-            >
-              版本列表与对比
-            </Button>
-            <Button
-              icon="code"
-              onClick={() => {
-                openTask(current, 5)
-                setModal(null)
-              }}
-            >
-              Agent 执行记录
-            </Button>
+            {role === "编辑" && current.creator === user && !["完成", "运行中"].includes(current.status) && (
+              <Button
+                icon="edit"
+                onClick={() => {
+                  const task = current
+                  setModal(null)
+                  openForm(task)
+                }}
+              >
+                修改任务与文案
+              </Button>
+            )}
             <Button
               icon="sparkles"
               disabled={
@@ -3708,7 +3887,7 @@ export default function App() {
       )}
       {modal === "material-form" && (
         <Modal
-          title={materialForm.id ? "修改教学资料" : "创建教学资料"}
+          title={materialForm.id ? "修改资料" : "创建资料"}
           onClose={() => setModal(null)}
           wide
           footer={
