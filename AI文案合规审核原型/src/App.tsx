@@ -28,7 +28,9 @@ import {
   type AgentCall,
   type Role,
   type Task,
+  type Version,
 } from "./data"
+import { readManuscriptFile } from "./manuscriptFile"
 
 type Page = "tasks" | "review" | "materials" | "templates" | "dictionary" | "accounts" | "audit" | "design" | "states" | "help" | "form" | "detail" | "forbidden"
 type Audit = {
@@ -110,6 +112,26 @@ const emptyMaterial = (): MaterialItem => ({
   chapter: "",
   excerpt: "",
 })
+function selectedCandidate(task: Task) {
+  if (task.selected < 0 || task.selected >= task.candidates.length) return null
+  return task.candidates[task.selected]
+}
+function draftParts(task: Task) {
+  const chosen = selectedCandidate(task)
+  if (!chosen) return { headline: "", body: task.copy }
+  const pasted = `${chosen.headline}\n${chosen.body}`
+  if (!task.copy.trim() || task.copy === pasted) {
+    return { headline: chosen.headline, body: chosen.body }
+  }
+  if (task.copy.startsWith(`${chosen.headline}\n`)) {
+    return { headline: chosen.headline, body: task.copy.slice(chosen.headline.length + 1) }
+  }
+  const splitAt = task.copy.indexOf("\n")
+  if (splitAt >= 0) {
+    return { headline: task.copy.slice(0, splitAt), body: task.copy.slice(splitAt + 1) }
+  }
+  return { headline: chosen.headline, body: task.copy }
+}
 function rejectionReason(task: Task) {
   if (task.status !== "退回") return ""
   const hit = [...task.versions]
@@ -150,6 +172,9 @@ export default function App() {
     contents: "",
     styles: ["温暖治愈"],
   })
+  const [manuscriptFileName, setManuscriptFileName] = useState("")
+  const [readingManuscript, setReadingManuscript] = useState(false)
+  const manuscriptInputRef = useRef<HTMLInputElement | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [calls, setCalls] = useState<Record<string, AgentCall[]>>({})
   const [run, setRun] = useState<{
@@ -160,8 +185,60 @@ export default function App() {
   const [failureMode, setFailureMode] = useState(false)
   const [dictVersion, setDictVersion] = useState("DICT-V1")
   const [dictionaries, setDictionaries] = useState<Record<string, string[]>>({
-    "DICT-V1": ["最佳", "第一", "绝对"],
-    "DICT-V2": ["最佳", "第一", "绝对", "治愈"],
+    "DICT-V1": [
+      "最佳",
+      "最好",
+      "最优",
+      "最强",
+      "第一",
+      "唯一",
+      "顶级",
+      "极致",
+      "完美",
+      "绝对",
+      "永久",
+      "万能",
+      "国家级",
+      "世界级",
+      "史无前例",
+      "空前绝后",
+    ],
+    "DICT-V2": [
+      "最佳",
+      "最好",
+      "最优",
+      "最强",
+      "第一",
+      "唯一",
+      "顶级",
+      "极致",
+      "完美",
+      "绝对",
+      "永久",
+      "万能",
+      "国家级",
+      "世界级",
+      "史无前例",
+      "空前绝后",
+      "治愈",
+      "必读",
+      "必买",
+      "必看",
+      "疯抢",
+      "秒杀",
+      "畅销冠军",
+      "销量第一",
+      "权威认证",
+      "官方指定",
+      "包治",
+      "根治",
+      "立竿见影",
+      "100%",
+      "全网最低",
+      "免费赠送",
+      "获奖无数",
+      "保证畅销",
+    ],
   })
   const [dictionaryDraft, setDictionaryDraft] = useState("")
   const [scanText, setScanText] = useState("")
@@ -234,6 +311,22 @@ export default function App() {
       content:
         "用问题或故事引子建立悬念，引导阅读兴趣，不编造书稿未提供的情节。",
       version: "V1.1",
+    },
+    {
+      rowId: 0,
+      id: "TPL-004",
+      style: "简洁有力",
+      content:
+        "句子短、节奏快、信息密度高；少用修饰与排比，突出关键意象与行动，避免空泛抒情和口号化表达。",
+      version: "V1.0",
+    },
+    {
+      rowId: 0,
+      id: "TPL-005",
+      style: "生活美学",
+      content:
+        "从日常器物、气味、光影与习惯入手，写可感的生活质地；语气克制优雅，不写成促销清单，也不虚构书稿未提供的场景。",
+      version: "V1.0",
     },
   ])
   const availableStyles = Array.from(
@@ -453,6 +546,20 @@ export default function App() {
       api.patchTask(activeId, persist).catch((error: ApiError) => notify(error.message, true))
     }
   }
+  function applySelectedDraft(task: Task) {
+    const chosen = selectedCandidate(task)
+    if (!chosen) return task.copy
+    const first = task.candidates[0]
+    const firstText = first ? `${first.headline}\n${first.body}` : ""
+    const pasted = `${chosen.headline}\n${chosen.body}`
+    if (task.copy.trim() && task.copy !== firstText) return task.copy
+    setTasks((prev) =>
+      prev.map((item) => (item.id === task.id ? { ...item, copy: pasted } : item)),
+    )
+    setScanText(pasted)
+    setScan(null)
+    return pasted
+  }
   function openTask(task: Task, targetTab = 0) {
     if (role === "编辑" && task.creator !== user) {
       denied("查看他人任务", task.id, true)
@@ -496,10 +603,32 @@ export default function App() {
             styles: ["温暖治愈"],
           },
     )
+    setManuscriptFileName("")
+    setReadingManuscript(false)
     setErrors({})
     setPageHistory((history) => [...history, page])
     setPage("form")
     setTab(0)
+  }
+  async function importManuscriptFile(file: File | null | undefined) {
+    if (!file) return
+    setReadingManuscript(true)
+    try {
+      const result = await readManuscriptFile(file)
+      if (!result.text) {
+        notify("文件没有可读文本。", true)
+        return
+      }
+      setForm((prev) => ({ ...prev, intro: result.text }))
+      setManuscriptFileName(result.name)
+      if (errors.intro) setErrors((prev) => ({ ...prev, intro: "" }))
+      notify(`已从 ${result.name} 读入内容简介，可继续手工修改。`)
+    } catch (error) {
+      notify((error as Error).message || "文件读取失败", true)
+    } finally {
+      setReadingManuscript(false)
+      if (manuscriptInputRef.current) manuscriptInputRef.current.value = ""
+    }
   }
   async function saveForm(generate: boolean) {
     if (role === "主编")
@@ -510,8 +639,6 @@ export default function App() {
       if (!form.author.trim()) next.author = "请输入作者"
       if (!form.intro.trim())
         next.intro = "请填写内容简介，不可在缺少简介时发起 AI"
-      else if (form.intro.trim().length < 50)
-        next.intro = `信息不足：简介至少需要 50 字，当前 ${form.intro.trim().length} 字。请补充核心情节、主题与人物，不会虚构书目信息。`
       if (!form.styles.length) next.styles = "请至少选择一个风格标签"
     }
     setErrors(next)
@@ -630,8 +757,8 @@ export default function App() {
     const matched = materialForTitle(task.title, task.id)
     if (!matched)
       return notify(`没有与书名「${task.title}」同名的资料，请先在资料管理中创建。`, true)
-    if (task.intro.length < 50 || !task.styles.length || !task.title || !task.author)
-      return notify("信息不足：请补充书名、作者、至少 50 字简介和风格。", true)
+    if (!task.title.trim() || !task.author.trim() || !task.intro.trim() || !task.styles.length)
+      return notify("请补充书名、作者、内容简介和至少一个风格后再发起。", true)
     if (retry && task.retries >= 2)
       return notify("已达到最大重试次数 R = 2，请检查资料或联系管理员。", true)
     if ((calls[task.id] || []).length + 4 > 30)
@@ -1404,11 +1531,57 @@ export default function App() {
                   error={errors.intro}
                   hint={
                     <span className="spread">
-                      <span>至少 50 字，请说明核心内容、人物及主题。</span>
+                      <span>至少 50 字，请说明核心内容、人物及主题。也可上传 .txt / .docx。</span>
                       <span>{form.intro.length} 字</span>
                     </span>
                   }
                 >
+                  <div
+                    className={`manuscript-upload${readingManuscript ? " is-reading" : ""}`}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = "copy"
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      void importManuscriptFile(e.dataTransfer.files?.[0])
+                    }}
+                  >
+                    <input
+                      ref={manuscriptInputRef}
+                      type="file"
+                      accept=".txt,.docx,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      hidden
+                      onChange={(e) =>
+                        void importManuscriptFile(e.target.files?.[0])
+                      }
+                    />
+                    <div className="manuscript-upload-main">
+                      <Icon name="upload" size={18} />
+                      <div>
+                        <strong>
+                          {readingManuscript
+                            ? "正在读取文件…"
+                            : "上传书稿文件填入简介"}
+                        </strong>
+                        <p>支持 .txt、.docx；可拖拽到此处，或点击选择文件。导入后仍可编辑。</p>
+                      </div>
+                    </div>
+                    <div className="manuscript-upload-actions">
+                      {manuscriptFileName ? (
+                        <Badge tone="indigo" dot={false}>
+                          {manuscriptFileName}
+                        </Badge>
+                      ) : null}
+                      <Button
+                        type="button"
+                        disabled={readingManuscript}
+                        onClick={() => manuscriptInputRef.current?.click()}
+                      >
+                        {manuscriptFileName ? "重新选择" : "选择文件"}
+                      </Button>
+                    </div>
+                  </div>
                   <Textarea
                     rows={7}
                     placeholder="本书讲述……请提供真实书稿信息，AI 不会补造缺失的书目信息。"
@@ -1497,6 +1670,10 @@ export default function App() {
                 <span>
                   <Icon name="check" />
                   不少于 50 字的书稿简介
+                </span>
+                <span>
+                  <Icon name="check" />
+                  也可上传 .txt / .docx 导入
                 </span>
                 <span>
                   <Icon name="check" />
@@ -1592,10 +1769,24 @@ export default function App() {
                 variant="ghost"
                 key={s}
                 className={tab === i ? "active" : ""}
-                onClick={() => setTab(i)}
+                onClick={() => {
+                  if (i === 2) applySelectedDraft(current)
+                  setTab(i)
+                }}
               >
                 {s}
-                {i === 4 && <span>{current.versions.length}</span>}
+                {i === 4 && (
+                  <span>
+                    {current.versions.length +
+                      (current.versions.some(
+                        (v) => v.name === "编辑修改版" || v.name === "人工提交版",
+                      ) ||
+                      current.selected < 0 ||
+                      !current.copy.trim()
+                        ? 0
+                        : 1)}
+                  </span>
+                )}
               </Button>
             ))}
           </div>
@@ -1991,7 +2182,10 @@ export default function App() {
                           variant="primary"
                           icon="arrow"
                           disabled={current.selected < 0}
-                          onClick={() => setTab(2)}
+                          onClick={() => {
+                            applySelectedDraft(current)
+                            setTab(2)
+                          }}
                         >
                           下一步：人工微调
                         </Button>
@@ -2073,9 +2267,9 @@ export default function App() {
                     <Icon name="shield" size={30} />
                     <Heading level={3}>可解释的规则判断</Heading>
                     <p>
-                      自定义 DICT-V1：最佳、第一、绝对
+                      自定义 DICT-V1：腰封绝对化用语（最佳/第一/顶级/国家级等）
                       <br />
-                      自定义 DICT-V2：另含“治愈”
+                      自定义 DICT-V2：另含治愈、必读、畅销冠军、权威认证等夸大宣传词
                       <br />
                       开源 {ossMeta.version}：{ossMeta.name} 广告类词表（{ossMeta.license}）
                     </p>
@@ -2215,27 +2409,42 @@ export default function App() {
                   <section className="comparison-column">
                     <div className="comparison-heading">
                       <Badge dot={false}>原始生成版</Badge>
-                      <span>AI Agent · {current.batch}</span>
+                      <span>
+                        {selectedCandidate(current)
+                          ? `已选定方案 0${current.selected + 1} · ${selectedCandidate(current)?.label}`
+                          : `AI Agent · ${current.batch}`}
+                      </span>
                     </div>
-                    <div className="original-copy">
-                      {current.versions.find((v) => v.name === "原始生成版")
-                        ?.copy || "尚未生成原始文案"}
-                    </div>
+                    {selectedCandidate(current) ? (
+                      <div className="original-copy">
+                        <div className="copy-piece">
+                          <span className="copy-kicker">标题</span>
+                          <p className="copy-headline">{selectedCandidate(current)?.headline}</p>
+                        </div>
+                        <div className="copy-piece">
+                          <span className="copy-kicker">正文</span>
+                          <p className="copy-body">{selectedCandidate(current)?.body}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="original-copy">请先在上一步选定一条候选文案。</div>
+                    )}
                   </section>
                   <section className="comparison-column">
                     <div className="comparison-heading">
                       <Badge tone="indigo" dot={false}>
-                        {reviewing ? "人工提交版" : "当前提交版"}
+                        {reviewing ? "编辑修改版" : "当前提交版"}
                       </Badge>
                       <span>{current.creator}</span>
                     </div>
-                    <Field label="文案内容" required error={errors.copy}>
+                    <Field label="标题" required error={errors.copy}>
                       <Textarea
-                        rows={6}
-                        value={current.copy}
-                        disabled={!canEdit}
+                        rows={2}
+                        value={draftParts(current).headline}
+                        disabled={!canEdit || current.selected < 0}
                         onChange={(e) => {
-                          const value = e.target.value
+                          const headline = e.target.value.replace(/\n/g, "")
+                          const value = `${headline}\n${draftParts(current).body}`
                           setTasks((prev) =>
                             prev.map((item) =>
                               item.id === current.id ? { ...item, copy: value } : item,
@@ -2243,6 +2452,26 @@ export default function App() {
                           )
                           setScanText(value)
                           setScan(null)
+                          if (errors.copy) setErrors((prev) => ({ ...prev, copy: "" }))
+                        }}
+                      />
+                    </Field>
+                    <Field label="正文" required>
+                      <Textarea
+                        rows={6}
+                        value={draftParts(current).body}
+                        disabled={!canEdit || current.selected < 0}
+                        onChange={(e) => {
+                          const body = e.target.value
+                          const value = `${draftParts(current).headline}\n${body}`
+                          setTasks((prev) =>
+                            prev.map((item) =>
+                              item.id === current.id ? { ...item, copy: value } : item,
+                            ),
+                          )
+                          setScanText(value)
+                          setScan(null)
+                          if (errors.copy) setErrors((prev) => ({ ...prev, copy: "" }))
                         }}
                       />
                     </Field>
@@ -2382,7 +2611,12 @@ export default function App() {
                 ) : null}
               </>
             )}
-            {tab === 4 && <VersionPanel task={current} />}
+            {tab === 4 && (
+              <VersionPanel
+                key={`${current.id}-${current.versions.length}-${current.selected}-${current.copy}`}
+                task={current}
+              />
+            )}
             {tab === 5 && (
               <>
                 <div className="section-heading">
@@ -2577,12 +2811,12 @@ export default function App() {
             <strong>
               {dictSource === "oss"
                 ? `开源词库 ${ossMeta.name}（${ossMeta.license}）· 广告类`
-                : "自定义词库 · 模拟数据，仅用于教学演示"}
+                : "自定义词库 · 图书腰封宣传禁限用语（教学演示）"}
             </strong>
             <p>
               {dictSource === "oss"
                 ? "匹配由 Sensitive-lexicon 广告类词表完成，词表只读。自定义词库仍按版本维护，两者可在筛查时切换。"
-                : "词条用于演示规则命中，不代表真实敏感词标准；不用于实际出版审核或合规结论。"}
+                : "词条参考图书腰封常见绝对化用语与夸大营销表述整理，仅用于教学命中演示，不代表真实执法或出版合规标准。"}
             </p>
           </Notice>
         )}
@@ -4163,23 +4397,78 @@ function highlightHits(text: string, hits: SensitiveHit[]) {
   return nodes
 }
 
+function versionTypeName(name: string) {
+  return name === "人工提交版" ? "编辑修改版" : name
+}
+function isEditedVersion(name: string) {
+  return name === "编辑修改版" || name === "人工提交版"
+}
+function versionCopyParts(copy: string) {
+  const splitAt = copy.indexOf("\n")
+  if (splitAt < 0) return { headline: copy, body: "" }
+  return { headline: copy.slice(0, splitAt), body: copy.slice(splitAt + 1) }
+}
+function resolveVersionCopy(task: Task, version: Version, index: number) {
+  const laterOriginal = task.versions
+    .slice(index + 1)
+    .some((item) => item.name === "原始生成版")
+  if (version.name === "原始生成版" && !laterOriginal && task.selected >= 0) {
+    const chosen = task.candidates[task.selected]
+    if (chosen) return `${chosen.headline}\n${chosen.body}`
+  }
+  return version.copy
+}
+function buildVersionRows(task: Task): Version[] {
+  const rows = task.versions.map((version, index) => ({
+    ...version,
+    name: versionTypeName(version.name),
+    copy: resolveVersionCopy(task, version, index),
+    user: isEditedVersion(version.name) ? version.user || task.creator : version.user,
+  }))
+  const hasEdit = rows.some((version) => isEditedVersion(version.name))
+  if (!hasEdit && task.selected >= 0 && task.copy.trim()) {
+    rows.push({
+      id: `V${rows.length + 1}`,
+      name: "编辑修改版",
+      copy: task.copy,
+      reason: task.reason.trim() || "人工微调稿（筛查后可提交）",
+      user: task.creator,
+      time: task.time,
+      opinion: "待确认提交",
+    })
+  }
+  return rows
+}
 function VersionPanel({ task }: { task: Task }) {
-  const [left, setLeft] = useState(0)
-  const [right, setRight] = useState(Math.max(0, task.versions.length - 1))
-  const a = task.versions[Math.min(left, task.versions.length - 1)],
-    b = task.versions[Math.min(right, task.versions.length - 1)]
+  const versions = buildVersionRows(task)
+  const defaultLeft = (() => {
+    const idx = versions.map((v) => v.name).lastIndexOf("原始生成版")
+    return idx >= 0 ? idx : 0
+  })()
+  const defaultRight = (() => {
+    for (let i = versions.length - 1; i >= 0; i--) {
+      if (isEditedVersion(versions[i].name)) return i
+    }
+    return Math.max(0, versions.length - 1)
+  })()
+  const [left, setLeft] = useState(defaultLeft)
+  const [right, setRight] = useState(defaultRight)
+  const leftIndex = Math.min(left, Math.max(0, versions.length - 1))
+  const rightIndex = Math.min(right, Math.max(0, versions.length - 1))
+  const a = versions[leftIndex]
+  const b = versions[rightIndex]
   return (
     <>
       <div className="section-heading">
         <div>
           <Heading>版本列表与对比</Heading>
-          <p>原始生成版与人工提交版独立保留，审核退回不会删除历史。</p>
+          <p>原始生成版与编辑修改版独立保留，审核退回不会删除历史。</p>
         </div>
         <Badge tone="indigo" dot={false}>
-          {task.versions.length} 个版本
+          {versions.length} 个版本
         </Badge>
       </div>
-      {!task.versions.length ? (
+      {!versions.length ? (
         <EmptyState
           title="暂无版本记录"
           description="AI 生成完成后将保存第一个原始版本。"
@@ -4198,8 +4487,8 @@ function VersionPanel({ task }: { task: Task }) {
               </tr>
             </thead>
             <tbody>
-              {task.versions.map((v, i) => (
-                <tr key={v.id}>
+              {versions.map((v, i) => (
+                <tr key={`${v.id}-${v.name}-${i}`}>
                   <td className="mono">{v.id}</td>
                   <td>
                     <Badge
@@ -4220,9 +4509,11 @@ function VersionPanel({ task }: { task: Task }) {
                       variant="text"
                       onClick={() => {
                         setRight(i)
-                        if (left === i)
+                        if (leftIndex === i)
                           setLeft(
-                            i === 0 ? Math.min(1, task.versions.length - 1) : 0,
+                            i === defaultLeft
+                              ? defaultRight
+                              : defaultLeft,
                           )
                       }}
                     >
@@ -4244,38 +4535,58 @@ function VersionPanel({ task }: { task: Task }) {
               </span>
             </div>
             <div className="compare-grid">
-              {[a, b].map((v, col) => (
-                <section className="comparison-column" key={col}>
-                  <div className="comparison-heading">
-                    <Select
-                      aria-label={col === 0 ? "左侧对比版本" : "右侧对比版本"}
-                      value={col === 0 ? left : right}
-                      onChange={(e) =>
-                        col === 0
-                          ? setLeft(+e.target.value)
-                          : setRight(+e.target.value)
-                      }
-                    >
-                      {task.versions.map((version, i) => (
-                        <option key={version.id} value={i}>
-                          {version.id} · {version.name}
-                        </option>
-                      ))}
-                    </Select>
-                    <span>{v.user}</span>
-                  </div>
-                  <div className="version-copy">
-                    {diffCopy(
-                      v.copy,
-                      col === 0 ? b.copy : a.copy,
-                      col === 0 ? "deleted" : "added",
-                    )}
-                  </div>
-                  <small>
-                    {v.time} · {v.opinion}
-                  </small>
-                </section>
-              ))}
+              {[a, b].map((v, col) => {
+                const parts = versionCopyParts(v.copy)
+                const other = col === 0 ? b.copy : a.copy
+                const otherParts = versionCopyParts(other)
+                return (
+                  <section className="comparison-column" key={col}>
+                    <div className="comparison-heading">
+                      <Select
+                        aria-label={col === 0 ? "左侧对比版本" : "右侧对比版本"}
+                        value={col === 0 ? leftIndex : rightIndex}
+                        onChange={(e) =>
+                          col === 0
+                            ? setLeft(+e.target.value)
+                            : setRight(+e.target.value)
+                        }
+                      >
+                        {versions.map((version, i) => (
+                          <option key={`${version.id}-${i}`} value={i}>
+                            {version.id} · {version.name}
+                          </option>
+                        ))}
+                      </Select>
+                      <span>{v.user}</span>
+                    </div>
+                    <div className="version-copy">
+                      <div className="copy-piece">
+                        <span className="copy-kicker">标题</span>
+                        <p className="copy-headline">
+                          {diffCopy(
+                            parts.headline,
+                            otherParts.headline,
+                            col === 0 ? "deleted" : "added",
+                          )}
+                        </p>
+                      </div>
+                      <div className="copy-piece">
+                        <span className="copy-kicker">正文</span>
+                        <p className="copy-body">
+                          {diffCopy(
+                            parts.body,
+                            otherParts.body,
+                            col === 0 ? "deleted" : "added",
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <small>
+                      {v.time} · {v.opinion}
+                    </small>
+                  </section>
+                )
+              })}
             </div>
           </div>
         </>

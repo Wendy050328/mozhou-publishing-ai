@@ -121,7 +121,7 @@ export const initialTasks: Task[] = names.map(
           },
           {
             id: "V2",
-            name: "人工提交版",
+            name: "编辑修改版",
             copy: initialCopy,
             reason: "删除绝对化用语，突出书稿的真实内容。",
             user: "林晓",

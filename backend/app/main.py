@@ -21,7 +21,7 @@ from .models import (
 from .security import create_token, decode_token, verify_password
 from .seed import seed_if_empty
 from .serialize import call_dict, now_text, styles_of, task_dict
-from .services.agent_stub import run_agent
+from .services.agent_stub import record_short_intro, run_agent
 from .services.opensource_scan import (
     OSS_LICENSE,
     OSS_NAME,
@@ -416,8 +416,6 @@ def create_task(body: TaskIn, db: Session = Depends(get_db), user: User = Depend
             errors["author"] = "请输入作者"
         if not body.intro.strip():
             errors["intro"] = "请填写内容简介，不可在缺少简介时发起 AI"
-        elif len(body.intro.strip()) < 50:
-            errors["intro"] = f"信息不足：简介至少需要 50 字，当前 {len(body.intro.strip())} 字。请补充核心情节、主题与人物，不会虚构书目信息。"
         if not body.styles:
             errors["styles"] = "请至少选择一个风格标签"
     if errors:
@@ -536,16 +534,35 @@ def run_task(task_id: str, body: RunIn, db: Session = Depends(get_db), user: Use
     if not matched:
         raise HTTPException(422, {"fields": {"material": f"没有与书名「{task.title.strip()}」同名的资料，请先在资料管理中创建。"}})
     task.material_id = matched.id
-    if len((task.intro or "").strip()) < 50 or not styles_of(task) or not task.title or not task.author:
-        raise HTTPException(422, {"fields": {"intro": "信息不足：请补充书名、作者、至少 50 字简介和风格。"}})
+    intro = (task.intro or "").strip()
+    errors = {}
+    if not (task.title or "").strip():
+        errors["title"] = "请输入书名"
+    if not (task.author or "").strip():
+        errors["author"] = "请输入作者"
+    if not styles_of(task):
+        errors["styles"] = "请至少选择一个风格标签"
+    if not intro:
+        errors["intro"] = "请填写内容简介，不可在缺少简介时发起 AI"
+    if errors:
+        raise HTTPException(422, {"fields": errors})
+    allowed = ["待处理", "退回", "待审核", "失败", "运行中"]
+    if task.status not in allowed:
+        raise HTTPException(400, "当前任务状态不支持发起生成")
+    if len(intro) < 50:
+        call_count = db.query(AgentCall).filter(AgentCall.task_id == task.id).count()
+        if call_count >= 30:
+            raise HTTPException(400, "已达到单任务调用次数上限 N = 30")
+        message = record_short_intro(db, task)
+        audit(db, user, "重试 AI 任务（保留人工版本）" if body.retry else "发起 AI 处理", task.id, "失败")
+        db.commit()
+        fresh = get_task_or_404(db, task_id)
+        return {"task": task_dict(fresh), "calls": calls_of(db, task_id), "message": message}
     if body.retry and task.retries >= 2:
         raise HTTPException(400, "已达到最大重试次数 R = 2")
     call_count = db.query(AgentCall).filter(AgentCall.task_id == task.id).count()
     if call_count + 4 > 30:
         raise HTTPException(400, "已达到单任务调用次数上限 N = 30")
-    allowed = ["待处理", "退回", "待审核", "失败", "运行中"]
-    if task.status not in allowed:
-        raise HTTPException(400, "当前任务状态不支持发起生成")
     origin = task.status if task.status != "运行中" else "待处理"
     if body.retry or task.status == "失败":
         task.retries += 1
@@ -573,6 +590,12 @@ def select_candidate(task_id: str, body: SelectIn, db: Session = Depends(get_db)
     cand = task.candidates[body.index]
     task.selected = body.index
     task.copy = f"{cand.headline}\n{cand.body}"
+    originals = [v for v in task.versions if v.name == "原始生成版"]
+    if originals:
+        latest = originals[-1]
+        latest.copy = task.copy
+        latest.reason = f"AI 生成 · {task.batch or 'BATCH'} · 已选定方案 {body.index + 1}（{cand.label}）"
+        latest.opinion = "已选定，待人工微调"
     if task.status == "待审核":
         task.status = "待处理"
         task.submitted = False
@@ -632,6 +655,33 @@ def scan_task(task_id: str, body: ScanIn, db: Session = Depends(get_db), user: U
         if task.status == "失败":
             task.status = "待处理"
         message = f"发现 {len(hits)} 处敏感词，请修改后重新筛查。" if hits else "本地规则工具筛查完成，未发现敏感词。筛查不会提交审核。"
+        if not hits:
+            draft_text = body.text.strip()
+            human_names = ("编辑修改版", "人工提交版")
+            draft = next((v for v in reversed(task.versions) if v.name in human_names), None)
+            reason = (task.reason or "").strip() or "人工微调后敏感词筛查通过"
+            if draft and not task.submitted and task.status in ("待处理", "退回", "失败"):
+                draft.copy = draft_text
+                draft.user = user.name
+                draft.time = now_text()
+                draft.reason = reason
+                draft.opinion = "敏感词筛查通过，待确认提交"
+                draft.name = "编辑修改版"
+            else:
+                seq = len(task.versions) + 1
+                db.add(
+                    Version(
+                        task_id=task.id,
+                        seq=seq,
+                        vid=f"V{seq}",
+                        name="编辑修改版",
+                        copy=draft_text,
+                        reason=reason,
+                        user=user.name,
+                        time=now_text(),
+                        opinion="敏感词筛查通过，待确认提交",
+                    )
+                )
     task.time = now_text()
     audit(db, user, "本地规则敏感词筛查", f"{task.id} · {body.rule_version}", error or ("不通过" if hits else "通过"))
     db.commit()
@@ -657,6 +707,8 @@ def submit_task(task_id: str, body: SubmitIn, db: Session = Depends(get_db), use
         audit(db, user, "人工微调提交", task.id, "403 · 权限拒绝")
         db.commit()
         raise HTTPException(403, "无权提交")
+    if task.submitted or task.status == "待审核":
+        raise HTTPException(400, "该任务已提交审核，不能重复提交。")
     if task.status not in ("待处理", "退回"):
         raise HTTPException(400, "只有确认并提交审核后才会进入待审核。请先完成编辑。")
     errors = {}
@@ -668,26 +720,38 @@ def submit_task(task_id: str, body: SubmitIn, db: Session = Depends(get_db), use
         errors["selected"] = "请先选定一条候选文案"
     if errors:
         raise HTTPException(422, {"fields": errors})
-    seq = len(task.versions) + 1
-    db.add(
-        Version(
-            task_id=task.id,
-            seq=seq,
-            vid=f"V{seq}",
-            name="人工提交版",
-            copy=body.copy,
-            reason=body.reason.strip(),
-            user=user.name,
-            time=now_text(),
-            opinion="等待主编审核",
+    human_names = ("编辑修改版", "人工提交版")
+    draft = next((v for v in reversed(task.versions) if v.name in human_names), None)
+    if draft and not task.submitted:
+        draft.copy = body.copy
+        draft.reason = body.reason.strip()
+        draft.user = user.name
+        draft.time = now_text()
+        draft.opinion = "等待主编审核"
+        draft.name = "编辑修改版"
+        vid = draft.vid
+    else:
+        seq = len(task.versions) + 1
+        vid = f"V{seq}"
+        db.add(
+            Version(
+                task_id=task.id,
+                seq=seq,
+                vid=vid,
+                name="编辑修改版",
+                copy=body.copy,
+                reason=body.reason.strip(),
+                user=user.name,
+                time=now_text(),
+                opinion="等待主编审核",
+            )
         )
-    )
     task.copy = body.copy
     task.reason = body.reason.strip()
     task.status = "待审核"
     task.submitted = True
     task.time = now_text()
-    audit(db, user, "提交人工修改版本", f"{task.id} · V{seq}")
+    audit(db, user, "提交人工修改版本", f"{task.id} · {vid}")
     db.commit()
     return task_dict(get_task_or_404(db, task_id))
 

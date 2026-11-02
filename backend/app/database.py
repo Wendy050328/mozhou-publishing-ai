@@ -1,8 +1,10 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 engine = create_engine(
-    "sqlite:///./publishing_ai.db",
+    os.getenv("DATABASE_URL", "sqlite:///./publishing_ai.db"),
     connect_args={"check_same_thread": False},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -138,7 +138,7 @@ def seed_if_empty(db: Session) -> None:
                         task_id=tid,
                         seq=2,
                         vid="V2",
-                        name="人工提交版",
+                        name="编辑修改版",
                         copy=INITIAL_COPY,
                         reason="删除绝对化用语，突出书稿的真实内容。",
                         user=creator.name,
@@ -161,12 +161,53 @@ def seed_if_empty(db: Session) -> None:
             StyleTemplate(tpl_id="TPL-001", style="温暖治愈", version="V1.2", content="采用温暖细腻的语言，突出情感共鸣；以生活细节为切入点，避免绝对化宣传。"),
             StyleTemplate(tpl_id="TPL-002", style="文学叙事", version="V1.0", content="以具有画面感的文学语言呈现主题，保留叙事留白，关注人物与时代的关系。"),
             StyleTemplate(tpl_id="TPL-003", style="悬念引导", version="V1.1", content="用问题或故事引子建立悬念，引导阅读兴趣，不编造书稿未提供的情节。"),
+            StyleTemplate(tpl_id="TPL-004", style="简洁有力", version="V1.0", content="句子短、节奏快、信息密度高；少用修饰与排比，突出关键意象与行动，避免空泛抒情和口号化表达。"),
+            StyleTemplate(tpl_id="TPL-005", style="生活美学", version="V1.0", content="从日常器物、气味、光影与习惯入手，写可感的生活质地；语气克制优雅，不写成促销清单，也不虚构书稿未提供的场景。"),
         ]
     )
-    for word in ["最佳", "第一", "绝对"]:
-        db.add(SensitiveWord(word=word, rule_version="DICT-V1", source_note="模拟数据"))
-    for word in ["最佳", "第一", "绝对", "治愈"]:
-        db.add(SensitiveWord(word=word, rule_version="DICT-V2", source_note="模拟数据"))
+    # 图书腰封 / 推荐语常见禁限与绝对化宣传用语（教学演示词表，非执法标准）
+    dict_v1 = [
+        "最佳",
+        "最好",
+        "最优",
+        "最强",
+        "第一",
+        "唯一",
+        "顶级",
+        "极致",
+        "完美",
+        "绝对",
+        "永久",
+        "万能",
+        "国家级",
+        "世界级",
+        "史无前例",
+        "空前绝后",
+    ]
+    dict_v2 = dict_v1 + [
+        "治愈",
+        "必读",
+        "必买",
+        "必看",
+        "疯抢",
+        "秒杀",
+        "畅销冠军",
+        "销量第一",
+        "权威认证",
+        "官方指定",
+        "包治",
+        "根治",
+        "立竿见影",
+        "100%",
+        "全网最低",
+        "免费赠送",
+        "获奖无数",
+        "保证畅销",
+    ]
+    for word in dict_v1:
+        db.add(SensitiveWord(word=word, rule_version="DICT-V1", source_note="腰封宣传禁限用语 · 教学演示"))
+    for word in dict_v2:
+        db.add(SensitiveWord(word=word, rule_version="DICT-V2", source_note="腰封宣传禁限用语 · 教学演示"))
 
     db.add_all(
         [
