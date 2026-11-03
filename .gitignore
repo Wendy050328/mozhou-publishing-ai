@@ -12,3 +12,4 @@ venv/
 *.zip
 .idea/
 .vscode/
+.claude/
